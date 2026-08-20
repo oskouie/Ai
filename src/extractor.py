@@ -21,7 +21,17 @@ STOP_WORDS = {
     'نیومده', 'نیامده', 'ننشسته', 'نشده', 'شدم', 'کردم', 'دادم', 'واریز', 'شارژ',
     'تیکت', 'سلام', 'استاد', 'ممنون', 'باتشکر', 'خسته', 'نباشید', 'کارت', 'مبدا',
     'مقصد', 'حساب', 'حسابم', 'پشتیبانی', 'سایت', 'درگاه', 'شماره', 'ساعت', 'تاریخ',
-    'مبلغ', 'تومان', 'ریال', 'هزار', 'میلیون'
+    'مبلغ', 'تومان', 'ریال', 'هزار', 'میلیون', 'چرا', 'جواب', 'نمیدید', 'نمیدهید',
+    'پاسخ', 'بدهید', 'نمیدین', 'دادید', 'زدید', 'دیدید', 'کردید', 'گفتید', 'خواستید',
+    'دارید', 'دارم', 'داریم', 'کلاهبرداری', 'شرط', 'باخت', 'برد', 'ضریب', 'بازی',
+    'تایم', 'نگاه', 'کنید', 'چطور', 'میشه', 'اصلا', 'وجود', 'داشت', 'تقصیر', 'من',
+    'بود', 'بابا', 'بررسی', 'پیگیری'
+}
+
+DEPOSIT_KEYWORDS = {
+    'شارژ', 'واریز', 'واریزی', 'کارت', 'درگاه', 'شاپرک', 'کاسپین', 'پل',
+    'حساب', 'مبلغ', 'تومان', 'ریال', 'کارت به کارت', 'کارت‌به‌کارت', 'فیش',
+    'دیپوزیت', 'deposit', 'رسید'
 }
 
 def normalize_text(text: str) -> str:
@@ -72,6 +82,21 @@ def parse_ticket_posted_time_gregorian(ticket_posted_time: str | None) -> tuple[
             g_time_str = f"{int(t_m.group(1)):02d}:{int(t_m.group(2)):02d}"
 
     return g_date_str, g_time_str
+
+def is_deposit_related_ticket(full_text: str) -> bool:
+    """
+    Determines if a ticket is related to deposit/charge/financial operations.
+    """
+    if not full_text:
+        return False
+
+    norm_text = normalize_text(full_text)
+
+    # Check for 16-digit card number or deposit keywords
+    has_card = bool(re.search(r'\b\d{4}[- \n]?\d{4}[- \n]?\d{4}[- \n]?\d{4}\b', norm_text))
+    has_deposit_kw = any(kw in norm_text for kw in DEPOSIT_KEYWORDS)
+
+    return has_card or has_deposit_kw
 
 def parse_amount(text: str) -> int | None:
     if not text:
@@ -173,7 +198,6 @@ def parse_time(text: str) -> str | None:
 
     norm_text = normalize_text(text)
 
-    # 1) Keyword 'ساعت'
     kw_time_match = re.search(r'ساعت\s*[:\-]?\s*([0-2]?\d)[:\./](\d{1,2})(?:[:\./]\d{1,2})?', norm_text)
     if kw_time_match:
         hh = int(kw_time_match.group(1))
@@ -185,7 +209,6 @@ def parse_time(text: str) -> str | None:
                     hh += 12
             return f"{hh:02d}:{mm:02d}"
 
-    # Exclude date spans
     date_spans = []
     for d_m in re.finditer(r'(?:تاریخ\s*[:\-]?\s*)?\b(?:13\d{2}|14\d{2}|\d{2})[./;-]\d{1,2}[./;-]\d{1,2}\b', norm_text):
         date_spans.append(d_m.span())
@@ -290,13 +313,11 @@ def clean_person_name(candidate: str) -> str | None:
         return None
 
     candidate = re.sub(r'^(آقای|اقای|آقا|خانم|جناب)\s+', '', candidate.strip())
-    # Stop at non-name words or punctuation/digits
     candidate = re.split(r'[\d\n,،.\-:;؛!؟]', candidate)[0].strip()
     words = candidate.split()
 
     filtered_words = []
     for w in words:
-        w_clean = re.sub(r'^[وابتکثجچحخدذرزژسشصضطظعغفقکگلمنوهی]+', '', w) # strip common prefixes if needed
         if w in STOP_WORDS or len(w) < 2:
             break
         filtered_words.append(w)
@@ -318,7 +339,6 @@ def parse_gateway_and_names(text: str, customer_messages: list[str] = None) -> d
     elif any(kw in norm_text for kw in ['کارت‌به‌کارت', 'کارت به کارت', 'kart be kart', 'کارت به کارت کردم', 'پل']):
         gateway = "کارت‌به‌کارت"
 
-    # Match explicit "به نام" / "بنام" / "صاحب کارت مقصد"
     name_match = re.search(r'(?:به\s*نام|بنام|به\s*اسم|صاحب\s*کارت\s*مقصد)\s*[:\-]?\s*(?:آقای|اقای|آقا|خانم)?\s*([\u0600-\u06FF\s]+)', norm_text)
     if name_match:
         raw_cand = name_match.group(1).strip()
@@ -326,11 +346,9 @@ def parse_gateway_and_names(text: str, customer_messages: list[str] = None) -> d
         if cleaned:
             dest_name = cleaned
 
-    # Search for standalone name in separate messages (e.g. customer message containing just a person's name)
     if not dest_name and customer_messages:
         for msg_t in customer_messages:
             msg_norm = normalize_text(msg_t).strip()
-            # If a message is just a 2-3 word Persian name without verbs
             words = msg_norm.split()
             if 2 <= len(words) <= 3 and all(re.match(r'^[\u0600-\u06FF]+$', w) for w in words):
                 if not any(sw in msg_norm for sw in STOP_WORDS):
@@ -351,6 +369,20 @@ def extract_financial_info(ticket_messages: list[dict], ticket_posted_time: str 
         if msg.get('sender') == 'customer' and msg.get('text')
     ]
     full_text = "\n".join(customer_texts)
+
+    # First check if the ticket is deposit/financial related
+    if not is_deposit_related_ticket(full_text):
+        posted_g_date, _ = parse_ticket_posted_time_gregorian(ticket_posted_time)
+        return {
+            'amount_toman': None,
+            'time': None,
+            'date': posted_g_date,
+            'source_card': None,
+            'destination_card': None,
+            'destination_holder_name': None,
+            'gateway': "نامشخص",
+            'deposit_type': "نامشخص"
+        }
 
     amount = parse_amount(full_text)
     time_str = parse_time(full_text)
