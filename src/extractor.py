@@ -16,6 +16,14 @@ WORD_MILLIONS = {
     'دهمیلیون': 10000000, 'ده میلیون': 10000000, 'نیم میلیون': 500000
 }
 
+# Stop words to filter out non-person names
+STOP_WORDS = {
+    'نیومده', 'نیامده', 'ننشسته', 'نشده', 'شدم', 'کردم', 'دادم', 'واریز', 'شارژ',
+    'تیکت', 'سلام', 'استاد', 'ممنون', 'باتشکر', 'خسته', 'نباشید', 'کارت', 'مبدا',
+    'مقصد', 'حساب', 'حسابم', 'پشتیبانی', 'سایت', 'درگاه', 'شماره', 'ساعت', 'تاریخ',
+    'مبلغ', 'تومان', 'ریال', 'هزار', 'میلیون'
+}
+
 def normalize_text(text: str) -> str:
     if not text:
         return ""
@@ -43,7 +51,6 @@ def parse_ticket_posted_time_gregorian(ticket_posted_time: str | None) -> tuple[
     g_date_str = None
     if len(d_split) == 3:
         p1, p2, p3 = int(d_split[0]), int(d_split[1]), int(d_split[2])
-        # Format in database is YY.MM.DD or DD.MM.YY (e.g. 20.08.26 -> 2026/08/20 or 2020/08/26)
         if p1 <= 31 and p2 <= 12 and p3 >= 20:
             y = 2000 + p3
             m = p2
@@ -166,7 +173,7 @@ def parse_time(text: str) -> str | None:
 
     norm_text = normalize_text(text)
 
-    # 1) Keyword 'ساعت' followed by HH:MM:SS or HH:MM or HH.MM.SS or HH.MM or HH/MM
+    # 1) Keyword 'ساعت'
     kw_time_match = re.search(r'ساعت\s*[:\-]?\s*([0-2]?\d)[:\./](\d{1,2})(?:[:\./]\d{1,2})?', norm_text)
     if kw_time_match:
         hh = int(kw_time_match.group(1))
@@ -178,7 +185,7 @@ def parse_time(text: str) -> str | None:
                     hh += 12
             return f"{hh:02d}:{mm:02d}"
 
-    # Find all date spans so we exclude date components (like 05/28 in 1405/05/28)
+    # Exclude date spans
     date_spans = []
     for d_m in re.finditer(r'(?:تاریخ\s*[:\-]?\s*)?\b(?:13\d{2}|14\d{2}|\d{2})[./;-]\d{1,2}[./;-]\d{1,2}\b', norm_text):
         date_spans.append(d_m.span())
@@ -212,19 +219,16 @@ def parse_date(text: str, ticket_posted_time: str | None = None) -> str | None:
         if posted_g_date:
             return posted_g_date
 
-    # 1) YYYY/MM/DD or YYYY.MM.DD (e.g. 1405/05/28)
     full_date_match = re.search(r'\b(13\d{2}|14\d{2})[./;-](\d{1,2})[./;-](\d{1,2})\b', norm_text)
     if full_date_match:
         jy, jm, jd = int(full_date_match.group(1)), int(full_date_match.group(2)), int(full_date_match.group(3))
         return jalali_to_gregorian_str(jy, jm, jd)
 
-    # 2) Reverse full match: DD/MM/YYYY
     reverse_full_match = re.search(r'\b(\d{1,2})[./;-](\d{1,2})[./;-](13\d{2}|14\d{2})\b', norm_text)
     if reverse_full_match:
         jd, jm, jy = int(reverse_full_match.group(1)), int(reverse_full_match.group(2)), int(reverse_full_match.group(3))
         return jalali_to_gregorian_str(jy, jm, jd)
 
-    # 3) YY/MM/DD (e.g., 05/05/28 -> 1405/05/28)
     yy_date_match = re.search(r'\b(\d{2})[./;-](\d{1,2})[./;-](\d{1,2})\b', norm_text)
     if yy_date_match:
         yy, jm, jd = int(yy_date_match.group(1)), int(yy_date_match.group(2)), int(yy_date_match.group(3))
@@ -232,7 +236,6 @@ def parse_date(text: str, ticket_posted_time: str | None = None) -> str | None:
             jy = 1400 + yy
             return jalali_to_gregorian_str(jy, jm, jd)
 
-    # 4) Day + Month Name (e.g. 28 مرداد)
     for m_name, jm in MONTHS_FA.items():
         m_day_match = re.search(r'\b(\d{1,2})\s*' + m_name, norm_text)
         if m_day_match:
@@ -282,7 +285,27 @@ def parse_card_number(text: str) -> dict:
 
     return result
 
-def parse_gateway_and_names(text: str) -> dict:
+def clean_person_name(candidate: str) -> str | None:
+    if not candidate:
+        return None
+
+    candidate = re.sub(r'^(آقای|اقای|آقا|خانم|جناب)\s+', '', candidate.strip())
+    # Stop at non-name words or punctuation/digits
+    candidate = re.split(r'[\d\n,،.\-:;؛!؟]', candidate)[0].strip()
+    words = candidate.split()
+
+    filtered_words = []
+    for w in words:
+        w_clean = re.sub(r'^[وابتکثجچحخدذرزژسشصضطظعغفقکگلمنوهی]+', '', w) # strip common prefixes if needed
+        if w in STOP_WORDS or len(w) < 2:
+            break
+        filtered_words.append(w)
+
+    if len(filtered_words) >= 2:
+        return " ".join(filtered_words)
+    return None
+
+def parse_gateway_and_names(text: str, customer_messages: list[str] = None) -> dict:
     norm_text = normalize_text(text)
 
     gateway = "نامشخص"
@@ -295,12 +318,24 @@ def parse_gateway_and_names(text: str) -> dict:
     elif any(kw in norm_text for kw in ['کارت‌به‌کارت', 'کارت به کارت', 'kart be kart', 'کارت به کارت کردم', 'پل']):
         gateway = "کارت‌به‌کارت"
 
-    name_match = re.search(r'(?:به\s*نام|بنام|به\s*اسم|صاحب\s*کارت\s*مقصد|به\s*حساب)\s*[:\-]?\s*(?:آقای|اقای|آقا|خانم)?\s*([\u0600-\u06FF\s]+)', norm_text)
+    # Match explicit "به نام" / "بنام" / "صاحب کارت مقصد"
+    name_match = re.search(r'(?:به\s*نام|بنام|به\s*اسم|صاحب\s*کارت\s*مقصد)\s*[:\-]?\s*(?:آقای|اقای|آقا|خانم)?\s*([\u0600-\u06FF\s]+)', norm_text)
     if name_match:
-        raw_name = name_match.group(1).strip()
-        clean_name = re.split(r'(?:واریز|انتقال|انجام|ممنون|ساعت|تاریخ|شماره|تیکت|خسته|سلام|نیامده|کردم|\d)', raw_name)[0].strip()
-        if len(clean_name) >= 3:
-            dest_name = clean_name
+        raw_cand = name_match.group(1).strip()
+        cleaned = clean_person_name(raw_cand)
+        if cleaned:
+            dest_name = cleaned
+
+    # Search for standalone name in separate messages (e.g. customer message containing just a person's name)
+    if not dest_name and customer_messages:
+        for msg_t in customer_messages:
+            msg_norm = normalize_text(msg_t).strip()
+            # If a message is just a 2-3 word Persian name without verbs
+            words = msg_norm.split()
+            if 2 <= len(words) <= 3 and all(re.match(r'^[\u0600-\u06FF]+$', w) for w in words):
+                if not any(sw in msg_norm for sw in STOP_WORDS):
+                    dest_name = msg_norm
+                    break
 
     if dest_name and gateway == "نامشخص":
         gateway = "کارت‌به‌کارت"
@@ -321,7 +356,7 @@ def extract_financial_info(ticket_messages: list[dict], ticket_posted_time: str 
     time_str = parse_time(full_text)
     date_str = parse_date(full_text, ticket_posted_time=ticket_posted_time)
     cards = parse_card_number(full_text)
-    gw_info = parse_gateway_and_names(full_text)
+    gw_info = parse_gateway_and_names(full_text, customer_messages=customer_texts)
 
     return {
         'amount_toman': amount,
