@@ -23,6 +23,49 @@ def normalize_text(text: str) -> str:
     text = text.replace('\u200c', ' ').replace('\xa0', ' ')
     return text
 
+def jalali_to_gregorian_str(jy: int, jm: int, jd: int) -> str:
+    """Converts Jalali date (year, month, day) to Gregorian string YYYY/MM/DD."""
+    try:
+        g_date = jdatetime.date(jy, jm, jd).togregorian()
+        return g_date.strftime('%Y/%m/%d')
+    except Exception:
+        return f"{jy:04d}/{jm:02d}/{jd:02d}"
+
+def parse_ticket_posted_time_gregorian(ticket_posted_time: str | None) -> tuple[str | None, str | None]:
+    if not ticket_posted_time:
+        return None, None
+
+    parts = ticket_posted_time.strip().split('-')
+    date_part = parts[0].strip()
+    time_part = parts[1].strip() if len(parts) > 1 else None
+
+    d_split = re.split(r'[./-]', date_part)
+    g_date_str = None
+    if len(d_split) == 3:
+        p1, p2, p3 = int(d_split[0]), int(d_split[1]), int(d_split[2])
+        # Format in database is YY.MM.DD or DD.MM.YY (e.g. 20.08.26 -> 2026/08/20 or 2020/08/26)
+        if p1 <= 31 and p2 <= 12 and p3 >= 20:
+            y = 2000 + p3
+            m = p2
+            d = p1
+        elif p1 >= 20 and p2 <= 12 and p3 <= 31:
+            y = 2000 + p1
+            m = p2
+            d = p3
+        else:
+            y = 2000 + p1
+            m = p2
+            d = p3
+        g_date_str = f"{y:04d}/{m:02d}/{d:02d}"
+
+    g_time_str = None
+    if time_part:
+        t_m = re.search(r'(\d{1,2}):(\d{2})', time_part)
+        if t_m:
+            g_time_str = f"{int(t_m.group(1)):02d}:{int(t_m.group(2)):02d}"
+
+    return g_date_str, g_time_str
+
 def parse_amount(text: str) -> int | None:
     if not text:
         return None
@@ -81,6 +124,13 @@ def parse_amount(text: str) -> int | None:
             val //= 10
         return val
 
+    m_attached = re.search(r'(\d{2,6})\s*(?:بهحساب|به\s*حساب|واریز|شارژ|انتقال)', norm_text)
+    if m_attached:
+        val = int(m_attached.group(1))
+        if val < 10000 and val > 0:
+            val *= 1000
+        return val
+
     m_unit = re.search(r'(\d{1,3}(?:[,\./]\d{3})+|\d+)\s*(تومان|تومن|ریال|ريال)', norm_text)
     if m_unit:
         num_str = re.sub(r'[,\./]', '', m_unit.group(1))
@@ -116,8 +166,8 @@ def parse_time(text: str) -> str | None:
 
     norm_text = normalize_text(text)
 
-    # First look for time explicitly prefixed with keyword 'ساعت'
-    kw_time_match = re.search(r'ساعت\s*[:\-]?\s*(\b[0-2]?\d)[:\./](\d{1,2})(?:[:\./]\d{1,2})?', norm_text)
+    # 1) Keyword 'ساعت' followed by HH:MM:SS or HH:MM or HH.MM.SS or HH.MM or HH/MM
+    kw_time_match = re.search(r'ساعت\s*[:\-]?\s*([0-2]?\d)[:\./](\d{1,2})(?:[:\./]\d{1,2})?', norm_text)
     if kw_time_match:
         hh = int(kw_time_match.group(1))
         mm = int(kw_time_match.group(2))
@@ -128,15 +178,21 @@ def parse_time(text: str) -> str | None:
                     hh += 12
             return f"{hh:02d}:{mm:02d}"
 
-    # General HH:MM or HH.MM or HH/MM
-    time_match = re.search(r'(\b[0-2]?\d)[:\./](\d{1,2})(?:[:\./]\d{1,2})?', norm_text)
-    if time_match:
-        hh = int(time_match.group(1))
-        mm = int(time_match.group(2))
+    # Find all date spans so we exclude date components (like 05/28 in 1405/05/28)
+    date_spans = []
+    for d_m in re.finditer(r'(?:تاریخ\s*[:\-]?\s*)?\b(?:13\d{2}|14\d{2}|\d{2})[./;-]\d{1,2}[./;-]\d{1,2}\b', norm_text):
+        date_spans.append(d_m.span())
 
-        # Ignore if it looks like date month/day or year digits
+    all_time_matches = list(re.finditer(r'(?<!\d)([0-2]?\d)[:\./](\d{1,2})(?:[:\./]\d{1,2})?(?!\d)', norm_text))
+    for t_m in all_time_matches:
+        in_date = any(ds[0] <= t_m.start() and t_m.end() <= ds[1] for ds in date_spans)
+        if in_date:
+            continue
+
+        hh = int(t_m.group(1))
+        mm = int(t_m.group(2))
         if 0 <= hh <= 23 and 0 <= mm <= 59:
-            ctx = norm_text[max(0, time_match.start()-20):min(len(norm_text), time_match.end()+20)]
+            ctx = norm_text[max(0, t_m.start()-20):min(len(norm_text), t_m.end()+20)]
             if any(pm in ctx for pm in ['عصر', 'بعدازظهر', 'شب', 'بعد از ظهر', 'pm', 'PM']):
                 if 1 <= hh <= 11:
                     hh += 12
@@ -145,51 +201,46 @@ def parse_time(text: str) -> str | None:
     return None
 
 def parse_date(text: str, ticket_posted_time: str | None = None) -> str | None:
+    posted_g_date, _ = parse_ticket_posted_time_gregorian(ticket_posted_time)
+
     if not text:
-        text = ""
+        return posted_g_date
 
     norm_text = normalize_text(text)
 
+    if any(rel in norm_text for rel in ['امروز', 'الان', 'همین الان', 'همینامروز']):
+        if posted_g_date:
+            return posted_g_date
+
+    # 1) YYYY/MM/DD or YYYY.MM.DD (e.g. 1405/05/28)
     full_date_match = re.search(r'\b(13\d{2}|14\d{2})[./;-](\d{1,2})[./;-](\d{1,2})\b', norm_text)
     if full_date_match:
-        y, m, d = full_date_match.group(1), int(full_date_match.group(2)), int(full_date_match.group(3))
-        return f"{y}/{m:02d}/{d:02d}"
+        jy, jm, jd = int(full_date_match.group(1)), int(full_date_match.group(2)), int(full_date_match.group(3))
+        return jalali_to_gregorian_str(jy, jm, jd)
 
+    # 2) Reverse full match: DD/MM/YYYY
     reverse_full_match = re.search(r'\b(\d{1,2})[./;-](\d{1,2})[./;-](13\d{2}|14\d{2})\b', norm_text)
     if reverse_full_match:
-        d, m, y = int(reverse_full_match.group(1)), int(reverse_full_match.group(2)), reverse_full_match.group(3)
-        return f"{y}/{m:02d}/{d:02d}"
+        jd, jm, jy = int(reverse_full_match.group(1)), int(reverse_full_match.group(2)), int(reverse_full_match.group(3))
+        return jalali_to_gregorian_str(jy, jm, jd)
 
+    # 3) YY/MM/DD (e.g., 05/05/28 -> 1405/05/28)
     yy_date_match = re.search(r'\b(\d{2})[./;-](\d{1,2})[./;-](\d{1,2})\b', norm_text)
     if yy_date_match:
-        yy, m, d = yy_date_match.group(1), int(yy_date_match.group(2)), int(yy_date_match.group(3))
-        if 1 <= m <= 12 and 1 <= d <= 31:
-            y = f"14{yy}" if len(yy) == 2 else yy
-            return f"{y}/{m:02d}/{d:02d}"
+        yy, jm, jd = int(yy_date_match.group(1)), int(yy_date_match.group(2)), int(yy_date_match.group(3))
+        if 1 <= jm <= 12 and 1 <= jd <= 31:
+            jy = 1400 + yy
+            return jalali_to_gregorian_str(jy, jm, jd)
 
-    for m_name, m_num in MONTHS_FA.items():
+    # 4) Day + Month Name (e.g. 28 مرداد)
+    for m_name, jm in MONTHS_FA.items():
         m_day_match = re.search(r'\b(\d{1,2})\s*' + m_name, norm_text)
         if m_day_match:
-            d = int(m_day_match.group(1))
-            y = "1405"
-            if ticket_posted_time:
-                p_parts = re.split(r'[./-]', ticket_posted_time.split('-')[0].strip())
-                if len(p_parts) == 3 and len(p_parts[0]) == 2:
-                    y = '14' + p_parts[0]
-                elif len(p_parts) == 3 and len(p_parts[0]) == 4:
-                    y = p_parts[0]
-            return f"{y}/{m_num:02d}/{d:02d}"
+            jd = int(m_day_match.group(1))
+            jy = 1405
+            return jalali_to_gregorian_str(jy, jm, jd)
 
-    if ticket_posted_time:
-        posted_date = ticket_posted_time.split('-')[0].strip()
-        parts = re.split(r'[./-]', posted_date)
-        if len(parts) == 3:
-            y, m, d = parts[0], parts[1], parts[2]
-            if len(y) == 2:
-                y = '14' + y
-            return f"{y}/{int(m):02d}/{int(d):02d}"
-
-    return None
+    return posted_g_date
 
 def parse_card_number(text: str) -> dict:
     result = {
@@ -212,7 +263,7 @@ def parse_card_number(text: str) -> dict:
             end_pos = min(len(norm_text), match.end() + 50)
             ctx = norm_text[start_pos:end_pos]
 
-            is_src = any(kw in ctx for kw in ['از کارت', 'کارت خودم', 'کارت من', 'مبدا', 'مبدأ', 'از حساب', 'کارت مبدا'])
+            is_src = any(kw in ctx for kw in ['از کارت', 'کارت خودم', 'کارت من', 'مبدا', 'مبدأ', 'از حساب', 'کارت رفاه', 'کارت ملی', 'کارت صادرات'])
             is_dst = any(kw in ctx for kw in ['به کارت', 'به حساب', 'مقصد', 'کارت مقصد'])
 
             if is_src and not is_dst:

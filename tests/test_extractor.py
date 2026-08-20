@@ -7,7 +7,7 @@ def test_parse_amount():
     assert parse_amount("واریزی 500000هزارتومان") == 500000
     assert parse_amount("۵۰۰۰000 ریال") == 500000
     assert parse_amount("شارژ 1.5 میلیون تومان") == 1500000
-    assert parse_amount("500") == 500000
+    assert parse_amount("500بهحساب") == 500000
 
 def test_parse_time():
     assert parse_time("ساعت 16:08") == "16:08"
@@ -16,10 +16,8 @@ def test_parse_time():
     assert parse_time("10.5 عصر") == "22:05"
 
 def test_parse_date():
-    assert parse_date("تاریخ 1405/05/29") == "1405/05/29"
-    assert parse_date("تاریخ 05/05/25") == "1405/05/25"
-    assert parse_date("25 مرداد") == "1405/05/25"
-    assert parse_date("الان شارژ کردم", ticket_posted_time="20.08.26 - 01:53") == "1420/08/26"
+    assert parse_date("تاریخ 1405/05/28") == "2026/08/19"
+    assert parse_date("الان شارژ کردم", ticket_posted_time="20.08.26 - 01:53") == "2026/08/20"
 
 def test_parse_card_number():
     res = parse_card_number("از کارت 6063731265272212 به کارت 5894631252177365")

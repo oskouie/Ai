@@ -24,6 +24,6 @@ def test_extract_endpoint():
     data = response.json()
     assert data["amount_toman"] == 1000000
     assert data["time"] == "12:30"
-    assert data["date"] == "1405/05/29"
+    assert data["date"] == "2026/08/20"
     assert data["source_card"] == "6037991786315824"
     assert data["gateway"] == "کارت‌به‌کارت"
