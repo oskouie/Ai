@@ -1,0 +1,4 @@
+data/tickets.json
+data/
+__pycache__/
+*.pyc
